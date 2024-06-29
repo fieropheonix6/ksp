@@ -31,7 +31,6 @@ import com.google.devtools.ksp.symbol.KSTypeArgument
 import com.google.devtools.ksp.symbol.Nullability
 import org.jetbrains.kotlin.analysis.api.KtStarTypeProjection
 import org.jetbrains.kotlin.analysis.api.annotations.KtAnnotationsList
-import org.jetbrains.kotlin.analysis.api.annotations.annotations
 import org.jetbrains.kotlin.analysis.api.symbols.*
 import org.jetbrains.kotlin.analysis.api.types.*
 
@@ -62,7 +61,7 @@ class KSTypeImpl private constructor(internal val type: KtType) : KSType {
     }
 
     override val declaration: KSDeclaration by lazy {
-        type.toDeclaration()
+        (type as? KaFunctionalType)?.abbreviatedSymbol()?.toKSDeclaration() ?: type.toDeclaration()
     }
 
     override val nullability: Nullability by lazy {
@@ -111,6 +110,10 @@ class KSTypeImpl private constructor(internal val type: KtType) : KSType {
     }
 
     override fun replace(arguments: List<KSTypeArgument>): KSType {
+        // Do not replace for already error types.
+        if (isError) {
+            return this
+        }
         errorTypeOnInconsistentArguments(
             arguments = arguments,
             placeholdersProvider = { type.typeArguments().map { KSTypeArgumentResolvedImpl.getCached(it) } },

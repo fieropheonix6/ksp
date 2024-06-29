@@ -32,6 +32,7 @@ import com.google.devtools.ksp.symbol.*
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiJavaFile
 import com.intellij.psi.impl.compiled.ClsMemberImpl
+import org.jetbrains.kotlin.analysis.api.KaAnalysisNonPublicApi
 import org.jetbrains.kotlin.analysis.api.KtAnalysisApiInternals
 import org.jetbrains.kotlin.analysis.api.KtAnalysisSession
 import org.jetbrains.kotlin.analysis.api.KtStarTypeProjection
@@ -45,8 +46,10 @@ import org.jetbrains.kotlin.analysis.api.components.buildTypeParameterType
 import org.jetbrains.kotlin.analysis.api.fir.KaSymbolByFirBuilder
 import org.jetbrains.kotlin.analysis.api.fir.evaluate.FirAnnotationValueConverter
 import org.jetbrains.kotlin.analysis.api.fir.symbols.KaFirValueParameterSymbol
+import org.jetbrains.kotlin.analysis.api.fir.types.KaFirFunctionalType
 import org.jetbrains.kotlin.analysis.api.fir.types.KaFirType
-import org.jetbrains.kotlin.analysis.api.lifetime.KtAlwaysAccessibleLifetimeToken
+import org.jetbrains.kotlin.analysis.api.impl.base.annotations.KaAnnotationImpl
+import org.jetbrains.kotlin.analysis.api.platform.lifetime.KotlinAlwaysAccessibleLifetimeToken
 import org.jetbrains.kotlin.analysis.api.symbols.*
 import org.jetbrains.kotlin.analysis.api.symbols.markers.KtSymbolWithMembers
 import org.jetbrains.kotlin.analysis.api.types.*
@@ -68,6 +71,8 @@ import org.jetbrains.kotlin.fir.types.ConeClassLikeType
 import org.jetbrains.kotlin.fir.types.ConeErrorType
 import org.jetbrains.kotlin.fir.types.ConeFlexibleType
 import org.jetbrains.kotlin.fir.types.ConeLookupTagBasedType
+import org.jetbrains.kotlin.fir.types.abbreviatedType
+import org.jetbrains.kotlin.fir.types.classId
 import org.jetbrains.kotlin.fir.types.coneType
 import org.jetbrains.kotlin.fir.types.isAny
 import org.jetbrains.kotlin.load.java.structure.JavaAnnotationArgument
@@ -92,7 +97,8 @@ import org.jetbrains.org.objectweb.asm.MethodVisitor
 import org.jetbrains.org.objectweb.asm.Opcodes
 
 internal val ktSymbolOriginToOrigin = mapOf(
-    KtSymbolOrigin.JAVA to Origin.JAVA,
+    KtSymbolOrigin.JAVA_SOURCE to Origin.JAVA,
+    KtSymbolOrigin.JAVA_LIBRARY to Origin.JAVA_LIB,
     KtSymbolOrigin.SOURCE to Origin.KOTLIN,
     KtSymbolOrigin.SAM_CONSTRUCTOR to Origin.SYNTHETIC,
     KtSymbolOrigin.SOURCE_MEMBER_GENERATED to Origin.SYNTHETIC,
@@ -147,6 +153,7 @@ internal fun KtAnnotationValue.render(): String {
     }
 }
 
+@OptIn(KaAnalysisNonPublicApi::class)
 internal fun KtType.render(inFunctionType: Boolean = false): String {
     return buildString {
         annotations.forEach {
@@ -178,12 +185,11 @@ internal fun KtType.render(inFunctionType: Boolean = false): String {
                     }
                 }
                 is KtClassErrorType -> KSErrorType(qualifiers.joinToString(".") { it.name.asString() }).toString()
-                is KtTypeErrorType -> KSErrorType(tryRenderAsNonErrorType()).toString()
+                is KtTypeErrorType -> KSErrorType(presentableText).toString()
                 is KtCapturedType -> asStringForDebugging()
                 is KtDefinitelyNotNullType -> original.render(inFunctionType) + " & Any"
                 is KtDynamicType -> "<dynamic type>"
                 is KtFlexibleType -> "(${lowerBound.render(inFunctionType)}..${upperBound.render(inFunctionType)})"
-                is KtIntegerLiteralType -> "ILT: $value"
                 is KtIntersectionType ->
                     this@render.conjuncts
                         .joinToString(separator = " & ", prefix = "(", postfix = ")") { it.render(inFunctionType) }
@@ -215,7 +221,7 @@ internal fun KSTypeArgument.toKtTypeProjection(): KtTypeProjection {
     }
     val argType = (this.type?.resolve() as? KSTypeImpl)?.type
     // TODO: maybe make a singleton of alwaysAccessibleLifetimeToken?
-    val alwaysAccessibleLifetimeToken = KtAlwaysAccessibleLifetimeToken(ResolverAAImpl.ktModule.project!!)
+    val alwaysAccessibleLifetimeToken = KotlinAlwaysAccessibleLifetimeToken(ResolverAAImpl.ktModule.project!!)
     return if (argType == null || variance == null) {
         KtStarTypeProjection(alwaysAccessibleLifetimeToken)
     } else {
@@ -284,7 +290,7 @@ internal fun KtSymbolWithMembers.getAllProperties(): Sequence<KSPropertyDeclarat
 
 internal fun KtSymbolWithMembers.getAllFunctions(): Sequence<KSFunctionDeclaration> {
     return analyze {
-        this@getAllFunctions.getMemberScope().let { it.getCallableSymbols() + it.getConstructors() }
+        this@getAllFunctions.getMemberScope().let { it.getCallableSymbols() + it.constructors }
             .filter {
                 it.isVisibleInClass(this@getAllFunctions as KtClassOrObjectSymbol) ||
                     it.getContainingSymbol() == this@getAllFunctions
@@ -343,6 +349,12 @@ internal fun ClassId.toKtClassSymbol(): KtClassOrObjectSymbol? {
     }
 }
 
+internal fun ClassId.toTypeAlias(): KtTypeAliasSymbol? {
+    return analyze {
+        getTypeAliasByClassId(this@toTypeAlias)
+    }
+}
+
 internal fun KtType.classifierSymbol(): KtClassifierSymbol? {
     return try {
         when (this) {
@@ -350,14 +362,13 @@ internal fun KtType.classifierSymbol(): KtClassifierSymbol? {
             // TODO: upstream is not exposing enough information for captured types.
             is KtCapturedType -> TODO("fix in upstream")
             is KtClassErrorType, is KtTypeErrorType -> null
-            is KtFunctionalType -> classSymbol
+            is KtFunctionalType -> (this as? KaFirFunctionalType)?.abbreviatedSymbol() ?: symbol
             is KtUsualClassType -> classSymbol
             is KtDefinitelyNotNullType -> original.classifierSymbol()
             is KtDynamicType -> null
             // flexible types have 2 bounds, using lower bound for a safer approximation.
             // TODO: find a case where lower bound is not appropriate.
             is KtFlexibleType -> lowerBound.classifierSymbol()
-            is KtIntegerLiteralType -> null
             // TODO: KSP does not support intersection type.
             is KtIntersectionType -> null
         }
@@ -460,7 +471,7 @@ internal fun KtValueParameterSymbol.getDefaultValue(): KtAnnotationValue? {
     fun FirExpression.toValue(builder: KaSymbolByFirBuilder): KtAnnotationValue? {
         if (this is FirAnnotation) {
             return KtAnnotationApplicationValue(
-                KtAnnotationApplicationWithArgumentsInfo(
+                KaAnnotationImpl(
                     JavaToKotlinClassMap.mapJavaToKotlinIncludingClassMapping(
                         ClassId.fromString(
                             (annotationTypeRef.coneType as? ConeLookupTagBasedType)?.lookupTag.toString()
@@ -468,12 +479,13 @@ internal fun KtValueParameterSymbol.getDefaultValue(): KtAnnotationValue? {
                     ),
                     null,
                     null,
-                    emptyList(),
+                    false,
+                    lazyOf(emptyList()),
                     0,
                     null,
-                    KtAlwaysAccessibleLifetimeToken(ResolverAAImpl.ktModule.project)
+                    KotlinAlwaysAccessibleLifetimeToken(ResolverAAImpl.ktModule.project)
                 ),
-                KtAlwaysAccessibleLifetimeToken(ResolverAAImpl.ktModule.project)
+                KotlinAlwaysAccessibleLifetimeToken(ResolverAAImpl.ktModule.project)
             )
         }
         if (this is FirArrayLiteral) {
@@ -577,7 +589,7 @@ internal fun fillInDeepSubstitutor(context: KtType, substitutorBuilder: KtSubsti
 }
 
 internal fun KtSymbol.psiIfSource(): PsiElement? {
-    return if (origin == KtSymbolOrigin.SOURCE || origin == KtSymbolOrigin.JAVA && toContainingFile() != null) {
+    return if (origin == KtSymbolOrigin.SOURCE || origin == KtSymbolOrigin.JAVA_SOURCE && toContainingFile() != null) {
         psi
     } else {
         null
@@ -607,7 +619,8 @@ fun ClassId.toKSName() = KSNameImpl.getCached(asSingleFqName().toString())
 // Only need to map java types if type declaration has origin of java
 // or kotlin functional type (in the case of Java functional type).
 internal fun KtClassLikeSymbol.shouldMapToKotlinForAssignabilityCheck(): Boolean {
-    return this.origin == KtSymbolOrigin.JAVA ||
+    return this.origin == KtSymbolOrigin.JAVA_SOURCE ||
+        this.origin == KtSymbolOrigin.JAVA_LIBRARY ||
         this.classIdIfNonLocal?.packageFqName?.asString() == "kotlin.jvm.functions"
 }
 
@@ -660,7 +673,7 @@ internal fun KtType.replace(newArgs: List<KtTypeProjection>): KtType {
             // No need to copy nullability for type parameters
             // because it is overridden to be always nullable in compiler.
             is KtTypeParameterSymbol -> analysisSession.buildTypeParameterType(symbol)
-            else -> throw IllegalStateException("Unexpected type $this")
+            else -> throw IllegalStateException("Unexpected type ${this@replace}")
         }
     }
 }
@@ -702,9 +715,9 @@ internal fun KtType.toWildcard(mode: TypeMappingMode): KtType {
     val args = this.typeArguments()
     return analyze {
         when (this@toWildcard) {
-            is KtClassType -> {
+            is KtNonErrorClassType -> {
                 // TODO: missing annotations from original type.
-                buildClassType(this@toWildcard.expandedClassSymbol!!) {
+                buildClassType(this@toWildcard.expandedSymbol!!) {
                     parameters.zip(args).map { (param, arg) ->
                         val argMode = mode.updateFromAnnotations(arg.type)
                         val variance = getVarianceForWildcard(param, arg, argMode)
@@ -793,4 +806,9 @@ internal fun TypeMappingMode.updateFromAnnotations(
     } else {
         this
     }
+}
+
+internal fun KaFunctionalType.abbreviatedSymbol(): KtTypeAliasSymbol? {
+    val classId = (this as? KaFirFunctionalType)?.coneType?.abbreviatedType?.classId ?: return null
+    return classId.toTypeAlias()
 }

@@ -17,7 +17,6 @@
 
 package com.google.devtools.ksp.impl
 
-import com.google.devtools.ksp.common.FileToSymbolsMap
 import com.google.devtools.ksp.common.IncrementalContextBase
 import com.google.devtools.ksp.common.LookupStorageWrapper
 import com.google.devtools.ksp.common.LookupSymbolWrapper
@@ -35,8 +34,6 @@ import com.google.devtools.ksp.symbol.KSNode
 import com.google.devtools.ksp.symbol.Origin
 import com.intellij.psi.PsiJavaFile
 import com.intellij.util.containers.MultiMap
-import com.intellij.util.io.DataExternalizer
-import com.intellij.util.io.IOUtil
 import org.jetbrains.kotlin.analysis.api.symbols.KtFunctionLikeSymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KtJavaFieldSymbol
 import org.jetbrains.kotlin.analysis.api.symbols.KtPropertySymbol
@@ -47,7 +44,6 @@ import org.jetbrains.kotlin.analysis.api.types.KtDefinitelyNotNullType
 import org.jetbrains.kotlin.analysis.api.types.KtDynamicType
 import org.jetbrains.kotlin.analysis.api.types.KtErrorType
 import org.jetbrains.kotlin.analysis.api.types.KtFlexibleType
-import org.jetbrains.kotlin.analysis.api.types.KtIntegerLiteralType
 import org.jetbrains.kotlin.analysis.api.types.KtIntersectionType
 import org.jetbrains.kotlin.analysis.api.types.KtNonErrorClassType
 import org.jetbrains.kotlin.analysis.api.types.KtType
@@ -61,8 +57,6 @@ import org.jetbrains.kotlin.incremental.components.Position
 import org.jetbrains.kotlin.incremental.components.ScopeKind
 import org.jetbrains.kotlin.incremental.storage.FileToPathConverter
 import org.jetbrains.kotlin.incremental.update
-import java.io.DataInput
-import java.io.DataOutput
 import java.io.File
 
 class IncrementalContextAA(
@@ -100,10 +94,6 @@ class IncrementalContextAA(
         LookupTrackerWrapperImpl((lookupTracker as? DualLookupTracker)?.classTracker ?: LookupTracker.DO_NOTHING)
     override val classLookupCache = LookupStorageWrapperImpl(LookupStorage(classLookupCacheDir, icContext))
 
-    override val sealedMap = FileToSymbolsMap(File(cachesDir, "sealed"), LookupSymbolExternalizer)
-
-    override val symbolsMap = FileToSymbolsMap(File(cachesDir, "symbols"), LookupSymbolExternalizer)
-
     // Debugging and testing only.
     fun dumpLookupRecords(): Map<String, List<String>> {
         val map = mutableMapOf<String, List<String>>()
@@ -140,7 +130,7 @@ class IncrementalContextAA(
             is KtDefinitelyNotNullType -> {
                 recordWithArgs(type.original, file)
             }
-            is KtErrorType, is KtIntegerLiteralType, is KtDynamicType, is KtTypeParameterType -> {}
+            is KtErrorType, is KtDynamicType, is KtTypeParameterType -> {}
         }
     }
 
@@ -204,12 +194,12 @@ class IncrementalContextAA(
     private val KtType.psiJavaFiles: List<PsiJavaFile>
         get() {
             return when (this) {
-                is KtNonErrorClassType -> classSymbol.psiJavaFile?.let { listOf(it) } ?: emptyList()
+                is KtNonErrorClassType -> symbol.psiJavaFile?.let { listOf(it) } ?: emptyList()
                 is KtFlexibleType -> lowerBound.psiJavaFiles + upperBound.psiJavaFiles
                 is KtIntersectionType -> conjuncts.flatMap { it.psiJavaFiles }
                 is KtCapturedType -> projection.type?.psiJavaFiles ?: emptyList()
                 is KtDefinitelyNotNullType -> original.psiJavaFiles
-                is KtErrorType, is KtIntegerLiteralType, is KtDynamicType, is KtTypeParameterType -> emptyList()
+                is KtErrorType, is KtDynamicType, is KtTypeParameterType -> emptyList()
             }
         }
 
@@ -291,16 +281,6 @@ class LookupStorageWrapperImpl(
     override fun close() = impl.close()
 
     override fun flush() = impl.flush()
-}
-
-object LookupSymbolExternalizer : DataExternalizer<LookupSymbolWrapper> {
-    override fun read(input: DataInput): LookupSymbolWrapper =
-        LookupSymbolWrapper(IOUtil.readString(input), IOUtil.readString(input))
-
-    override fun save(output: DataOutput, value: LookupSymbolWrapper) {
-        IOUtil.writeString(value.name, output)
-        IOUtil.writeString(value.scope, output)
-    }
 }
 
 internal class RelativeFileToPathConverter(val baseDir: File) : FileToPathConverter {

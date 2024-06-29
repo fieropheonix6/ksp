@@ -29,7 +29,6 @@ import com.google.devtools.ksp.symbol.KSVisitor
 import com.google.devtools.ksp.symbol.Location
 import com.google.devtools.ksp.symbol.Modifier
 import com.google.devtools.ksp.symbol.Origin
-import org.jetbrains.kotlin.analysis.api.annotations.annotations
 import org.jetbrains.kotlin.analysis.api.types.KtType
 import org.jetbrains.kotlin.psi.KtDynamicType
 import org.jetbrains.kotlin.psi.KtNullableType
@@ -50,7 +49,9 @@ class KSTypeReferenceImpl(
 
     // Remember to recordLookup if the usage is beyond a type reference.
     private val ktType: KtType by lazy {
-        analyze { ktTypeReference.getKtType() }
+        analyze {
+            ktTypeReference.getKtType().let { it.abbreviatedType ?: it }
+        }
     }
     override val element: KSReferenceElement? by lazy {
         var typeElement = ktTypeReference.typeElement

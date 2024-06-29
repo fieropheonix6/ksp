@@ -26,7 +26,6 @@ import org.junit.jupiter.api.parallel.Execution
 import org.junit.jupiter.api.parallel.ExecutionMode
 
 @Execution(ExecutionMode.SAME_THREAD)
-@DisabledOnOs(OS.WINDOWS)
 class KSPAATest : AbstractKSPAATest() {
 
     @TestMetadata("annotatedUtil.kt")
@@ -359,6 +358,12 @@ class KSPAATest : AbstractKSPAATest() {
         runTest("../kotlin-analysis-api/testData/javaWildcards2.kt")
     }
 
+    @TestMetadata("jvmName.kt")
+    @Test
+    fun testJvmName() {
+        runTest("../kotlin-analysis-api/testData/jvmName.kt")
+    }
+
     @TestMetadata("lateinitProperties.kt")
     @Test
     fun testLateinitProperties() {
@@ -494,36 +499,42 @@ class KSPAATest : AbstractKSPAATest() {
         runTest("../test-utils/testData/api/rawTypes.kt")
     }
 
+    @DisabledOnOs(OS.WINDOWS)
     @TestMetadata("recordJavaAnnotationTypes.kt")
     @Test
     fun testRecordJavaAnnotationTypes() {
         runTest("../kotlin-analysis-api/testData/recordJavaAnnotationTypes.kt")
     }
 
+    @DisabledOnOs(OS.WINDOWS)
     @TestMetadata("recordJavaAsMemberOf.kt")
     @Test
     fun testRecordJavaAsMemberOf() {
         runTest("../kotlin-analysis-api/testData/recordJavaAsMemberOf.kt")
     }
 
+    @DisabledOnOs(OS.WINDOWS)
     @TestMetadata("recordJavaGetAllMembers.kt")
     @Test
     fun testRecordJavaGetAllMembers() {
         runTest("../kotlin-analysis-api/testData/recordJavaGetAllMembers.kt")
     }
 
+    @DisabledOnOs(OS.WINDOWS)
     @TestMetadata("recordJavaOverrides.kt")
     @Test
     fun testRecordJavaOverrides() {
         runTest("../kotlin-analysis-api/testData/recordJavaOverrides.kt")
     }
 
+    @DisabledOnOs(OS.WINDOWS)
     @TestMetadata("recordJavaResolutions.kt")
     @Test
     fun testRecordJavaResolutions() {
         runTest("../kotlin-analysis-api/testData/recordJavaResolutions.kt")
     }
 
+    @DisabledOnOs(OS.WINDOWS)
     @TestMetadata("recordJavaSupertypes.kt")
     @Test
     fun testRecordJavaSupertypes() {
@@ -572,7 +583,6 @@ class KSPAATest : AbstractKSPAATest() {
         runTest("../test-utils/testData/api/throwList.kt")
     }
 
-    @Disabled
     @TestMetadata("topLevelMembers.kt")
     @Test
     fun testTopLevelMembers() {

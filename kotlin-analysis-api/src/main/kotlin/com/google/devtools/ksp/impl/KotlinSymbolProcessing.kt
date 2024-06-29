@@ -55,11 +55,24 @@ import com.intellij.psi.PsiTreeChangeAdapter
 import com.intellij.psi.PsiTreeChangeListener
 import com.intellij.psi.search.GlobalSearchScope
 import org.jetbrains.kotlin.analysis.api.KtAnalysisApiInternals
-import org.jetbrains.kotlin.analysis.api.lifetime.KtLifetimeTokenProvider
+import org.jetbrains.kotlin.analysis.api.platform.KotlinMessageBusProvider
+import org.jetbrains.kotlin.analysis.api.platform.KotlinProjectMessageBusProvider
+import org.jetbrains.kotlin.analysis.api.platform.declarations.*
+import org.jetbrains.kotlin.analysis.api.platform.lifetime.KotlinLifetimeTokenProvider
+import org.jetbrains.kotlin.analysis.api.platform.modification.KotlinGlobalModificationService
+import org.jetbrains.kotlin.analysis.api.platform.modification.KotlinModificationTrackerFactory
+import org.jetbrains.kotlin.analysis.api.platform.packages.KotlinPackagePartProviderFactory
+import org.jetbrains.kotlin.analysis.api.platform.packages.KotlinPackageProviderFactory
+import org.jetbrains.kotlin.analysis.api.platform.projectStructure.KotlinByModulesResolutionScopeProvider
+import org.jetbrains.kotlin.analysis.api.platform.projectStructure.KotlinResolutionScopeProvider
 import org.jetbrains.kotlin.analysis.api.resolve.extensions.KtResolveExtensionProvider
 import org.jetbrains.kotlin.analysis.api.session.KtAnalysisSessionProvider
 import org.jetbrains.kotlin.analysis.api.standalone.KotlinStaticPackagePartProviderFactory
 import org.jetbrains.kotlin.analysis.api.standalone.StandaloneAnalysisAPISession
+import org.jetbrains.kotlin.analysis.api.standalone.base.declarations.KotlinStandaloneAnnotationsResolverFactory
+import org.jetbrains.kotlin.analysis.api.standalone.base.declarations.KotlinStandaloneDeclarationProviderMerger
+import org.jetbrains.kotlin.analysis.api.standalone.base.modification.KotlinStandaloneGlobalModificationService
+import org.jetbrains.kotlin.analysis.api.standalone.base.modification.KotlinStandaloneModificationTrackerFactory
 import org.jetbrains.kotlin.analysis.api.standalone.base.project.structure.FirStandaloneServiceRegistrar
 import org.jetbrains.kotlin.analysis.api.standalone.base.project.structure.KtStaticProjectStructureProvider
 import org.jetbrains.kotlin.analysis.api.standalone.base.project.structure.LLFirStandaloneLibrarySymbolProviderFactory
@@ -73,8 +86,6 @@ import org.jetbrains.kotlin.analysis.project.structure.builder.KtModuleBuilder
 import org.jetbrains.kotlin.analysis.project.structure.builder.KtModuleProviderBuilder
 import org.jetbrains.kotlin.analysis.project.structure.builder.buildKtSdkModule
 import org.jetbrains.kotlin.analysis.project.structure.impl.KtSourceModuleImpl
-import org.jetbrains.kotlin.analysis.providers.*
-import org.jetbrains.kotlin.analysis.providers.impl.*
 import org.jetbrains.kotlin.cli.common.config.addKotlinSourceRoots
 import org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreApplicationEnvironmentMode
 import org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreProjectEnvironment
@@ -234,13 +245,6 @@ class KotlinSymbolProcessing(
             createPackagePartProvider,
         )
 
-        kotlinCoreProjectEnvironment.project.apply {
-            registerService(
-                KotlinPsiDeclarationProviderFactory::class.java,
-                KotlinStaticPsiDeclarationProviderFactory(this)
-            )
-        }
-
         project.registerService(
             LLFirLibrarySymbolProviderFactory::class.java,
             LLFirStandaloneLibrarySymbolProviderFactory::class.java
@@ -249,7 +253,7 @@ class KotlinSymbolProcessing(
             project.extensionArea, PsiTreeChangeListener.EP.name, PsiTreeChangeAdapter::class.java
         )
         return Triple(
-            StandaloneAnalysisAPISession(kotlinCoreProjectEnvironment, createPackagePartProvider) {
+            StandaloneAnalysisAPISession(kotlinCoreProjectEnvironment) {
                 // This is only used by kapt4, which should query a provider, instead of have it passed here IMHO.
                 // kapt4's implementation is static, which may or may not work for us depending on future use cases.
                 // Let's implement it later if necessary.
@@ -282,21 +286,21 @@ class KotlinSymbolProcessing(
 
             registerService(
                 KotlinModificationTrackerFactory::class.java,
-                KotlinStaticModificationTrackerFactory::class.java
+                KotlinStandaloneModificationTrackerFactory::class.java
             )
             registerService(
                 KotlinGlobalModificationService::class.java,
-                KotlinStaticGlobalModificationService::class.java
+                KotlinStandaloneGlobalModificationService::class.java
             )
             registerService(
-                KtLifetimeTokenProvider::class.java,
+                KotlinLifetimeTokenProvider::class.java,
                 KtAlwaysAccessibleLifeTimeTokenProvider::class.java
             )
 
             // Despite being a static implementation, this is only used by IDE tests
             registerService(
                 KotlinAnnotationsResolverFactory::class.java,
-                KotlinStaticAnnotationsResolverFactory(project, ktFiles)
+                KotlinStandaloneAnnotationsResolverFactory(project, ktFiles)
             )
             registerService(
                 KotlinResolutionScopeProvider::class.java,
@@ -312,7 +316,7 @@ class KotlinSymbolProcessing(
             )
             registerService(
                 KotlinDeclarationProviderMerger::class.java,
-                KotlinStaticDeclarationProviderMerger(this)
+                KotlinStandaloneDeclarationProviderMerger(this)
             )
             registerService(KotlinPackageProviderFactory::class.java, IncrementalKotlinPackageProviderFactory(project))
 
@@ -322,7 +326,7 @@ class KotlinSymbolProcessing(
             )
 
             registerService(
-                PackagePartProviderFactory::class.java,
+                KotlinPackagePartProviderFactory::class.java,
                 KotlinStaticPackagePartProviderFactory(packagePartProvider)
             )
         }
@@ -627,19 +631,22 @@ fun String?.toKotlinVersion(): KotlinVersion {
 }
 
 // Workaround for ShadowJar's minimize, whose configuration isn't very flexible.
+/* ktlint-disable */
 internal val DEAR_SHADOW_JAR_PLEASE_DO_NOT_REMOVE_THESE = listOf(
     kotlinx.coroutines.debug.internal.DebugProbesImpl::class.java,
     org.jetbrains.kotlin.analysis.api.impl.base.java.source.JavaElementSourceWithSmartPointerFactory::class.java,
     org.jetbrains.kotlin.analysis.api.impl.base.references.HLApiReferenceProviderService::class.java,
     org.jetbrains.kotlin.analysis.api.fir.KaFirSessionProvider::class.java,
     org.jetbrains.kotlin.analysis.api.fir.references.ReadWriteAccessCheckerFirImpl::class.java,
-    org.jetbrains.kotlin.analysis.api.standalone.base.providers.KotlinStandaloneDirectInheritorsProvider::class.java,
+    org.jetbrains.kotlin.analysis.api.standalone.base.declarations.KotlinStandaloneFirDirectInheritorsProvider::class.java,
     org.jetbrains.kotlin.analysis.low.level.api.fir.services.LLRealFirElementByPsiElementChooser::class.java,
     org.jetbrains.kotlin.analysis.low.level.api.fir.sessions.LLFirSessionInvalidationService::class.java,
     org.jetbrains.kotlin.analysis.low.level.api.fir.stubBased
         .deserialization.LLStubBasedLibrarySymbolProviderFactory::class.java,
-    org.jetbrains.kotlin.analysis.providers.impl.KotlinProjectMessageBusProvider::class.java,
-    org.jetbrains.kotlin.idea.references.KotlinFirReferenceContributor::class.java,
+    org.jetbrains.kotlin.analysis.api.impl.base.permissions.KaBaseAnalysisPermissionChecker::class.java,
+    org.jetbrains.kotlin.analysis.api.platform.KotlinProjectMessageBusProvider::class.java,
+    org.jetbrains.kotlin.analysis.api.platform.permissions.KaAnalysisPermissionChecker::class.java,
+    org.jetbrains.kotlin.analysis.api.fir.references.KotlinFirReferenceContributor::class.java,
     org.jetbrains.kotlin.light.classes.symbol.SymbolKotlinAsJavaSupport::class.java,
     org.jetbrains.kotlin.load.java.ErasedOverridabilityCondition::class.java,
     org.jetbrains.kotlin.load.java.FieldOverridabilityCondition::class.java,
@@ -647,6 +654,7 @@ internal val DEAR_SHADOW_JAR_PLEASE_DO_NOT_REMOVE_THESE = listOf(
     org.jetbrains.kotlin.serialization.deserialization.builtins.BuiltInsLoaderImpl::class.java,
     com.fasterxml.aalto.AaltoInputProperties::class.java,
     com.google.errorprone.annotations.CheckReturnValue::class.java,
+    com.intellij.diagnostic.ActivityCategory::class.java,
     com.intellij.openapi.application.JetBrainsProtocolHandler::class.java,
     com.intellij.openapi.editor.impl.EditorDocumentPriorities::class.java,
     com.intellij.psi.tree.ChildRoleBase::class.java,
@@ -655,6 +663,7 @@ internal val DEAR_SHADOW_JAR_PLEASE_DO_NOT_REMOVE_THESE = listOf(
     org.codehaus.stax2.XMLInputFactory2::class.java,
     org.codehaus.stax2.XMLStreamProperties::class.java,
 )
+/* ktlint-enable */
 
 fun TargetPlatform.getPlatformInfo(kspConfig: KSPConfig): List<PlatformInfo> =
     componentPlatforms.map { platform ->

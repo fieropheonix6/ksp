@@ -49,27 +49,27 @@ import com.google.devtools.ksp.symbol.*
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiMethod
 import com.intellij.psi.impl.file.impl.JavaFileManager
+import org.jetbrains.kotlin.analysis.api.KaExperimentalApi
 import org.jetbrains.kotlin.analysis.api.components.buildSubstitutor
+import org.jetbrains.kotlin.analysis.api.fir.symbols.KaFirSymbol
 import org.jetbrains.kotlin.analysis.api.fir.types.KaFirType
-import org.jetbrains.kotlin.analysis.api.symbols.KtEnumEntrySymbol
-import org.jetbrains.kotlin.analysis.api.symbols.KtFunctionLikeSymbol
-import org.jetbrains.kotlin.analysis.api.symbols.KtJavaFieldSymbol
-import org.jetbrains.kotlin.analysis.api.symbols.KtNamedClassOrObjectSymbol
-import org.jetbrains.kotlin.analysis.api.symbols.KtPropertyAccessorSymbol
-import org.jetbrains.kotlin.analysis.api.symbols.KtPropertySymbol
-import org.jetbrains.kotlin.analysis.api.symbols.KtSymbol
-import org.jetbrains.kotlin.analysis.api.symbols.KtTypeAliasSymbol
+import org.jetbrains.kotlin.analysis.api.symbols.*
 import org.jetbrains.kotlin.analysis.api.types.KtType
 import org.jetbrains.kotlin.analysis.decompiler.stub.file.ClsKotlinBinaryClassCache
 import org.jetbrains.kotlin.analysis.low.level.api.fir.api.getFirResolveSession
 import org.jetbrains.kotlin.analysis.project.structure.KtSourceModule
+import org.jetbrains.kotlin.asJava.classes.KtLightClassForFacade
+import org.jetbrains.kotlin.asJava.findFacadeClass
 import org.jetbrains.kotlin.asJava.toLightClass
 import org.jetbrains.kotlin.builtins.jvm.JavaToKotlinClassMap
 import org.jetbrains.kotlin.cli.jvm.compiler.KotlinCliJavaFileManagerImpl
+import org.jetbrains.kotlin.fir.symbols.impl.FirCallableSymbol
 import org.jetbrains.kotlin.fir.types.isRaw
 import org.jetbrains.kotlin.fir.types.typeContext
+import org.jetbrains.kotlin.light.classes.symbol.methods.SymbolLightAccessorMethod
 import org.jetbrains.kotlin.light.classes.symbol.methods.SymbolLightSimpleMethod
 import org.jetbrains.kotlin.load.java.structure.impl.JavaClassImpl
+import org.jetbrains.kotlin.load.kotlin.JvmPackagePartSource
 import org.jetbrains.kotlin.load.kotlin.TypeMappingMode
 import org.jetbrains.kotlin.load.kotlin.getOptimalModeForReturnType
 import org.jetbrains.kotlin.load.kotlin.getOptimalModeForValueParameter
@@ -324,6 +324,7 @@ class ResolverAAImpl(
         }
     }
 
+    @OptIn(KaExperimentalApi::class)
     @KspExperimental
     override fun getDeclarationsFromPackage(packageName: String): Sequence<KSDeclaration> {
         return analyze {
@@ -428,7 +429,7 @@ class ResolverAAImpl(
 
     override fun getJvmCheckedException(accessor: KSPropertyAccessor): Sequence<KSType> {
         return when (accessor.origin) {
-            Origin.KOTLIN -> {
+            Origin.KOTLIN, Origin.SYNTHETIC -> {
                 extractThrowsAnnotation(accessor)
             }
             Origin.KOTLIN_LIB, Origin.JAVA_LIB -> {
@@ -488,8 +489,13 @@ class ResolverAAImpl(
         (
             (accessor.receiver.closestClassDeclaration() as? KSClassDeclarationImpl)
                 ?.ktClassOrObjectSymbol?.psi as? KtClassOrObject
-            )?.toLightClass()?.allMethods?.filterIsInstance<SymbolLightSimpleMethod>()
-            ?.singleOrNull {
+            )?.toLightClass()?.allMethods
+            ?.let {
+                // If there are light accessors, information in light accessors are more accurate.
+                // check light accessor first, if not found then default to light simple method.
+                it.filterIsInstance<SymbolLightAccessorMethod>() + it.filterIsInstance<SymbolLightSimpleMethod>()
+            }
+            ?.firstOrNull {
                 (it.parameters.isNotEmpty() xor (accessor is KSPropertyGetter)) &&
                     it.kotlinOrigin == (accessor.receiver as? KSPropertyDeclarationImpl)?.ktPropertySymbol?.psi
             }?.let {
@@ -533,12 +539,30 @@ class ResolverAAImpl(
         return newKSFiles.asSequence()
     }
 
+    private fun getOwnerJvmClassNameHelper(declaration: KSDeclaration): String? {
+        return declaration.closestClassDeclaration()?.let {
+            // Find classId for JvmClassName for member callables.
+            (it as? KSClassDeclarationImpl)?.ktClassOrObjectSymbol?.classIdIfNonLocal
+                ?.asString()?.replace(".", "$")?.replace("/", ".")
+        } ?: declaration.containingFile?.let {
+            // Find containing file facade class name from file symbol
+            (it as? KSFileImpl)?.let {
+                ((it.ktFileSymbol.psi as? KtFile)?.findFacadeClass() as? KtLightClassForFacade)
+                    ?.facadeClassFqName?.asString()
+            }
+            // Down cast to fir symbol for library symbols as light facade class for libraries not available in AA.
+        } ?: (
+            ((declaration as? AbstractKSDeclarationImpl)?.ktDeclarationSymbol as? KaFirSymbol<FirCallableSymbol<*>>)
+                ?.firSymbol?.containerSource as? JvmPackagePartSource
+            )?.classId?.asFqNameString()
+    }
+
     override fun getOwnerJvmClassName(declaration: KSFunctionDeclaration): String? {
-        TODO("Not yet implemented")
+        return getOwnerJvmClassNameHelper(declaration)
     }
 
     override fun getOwnerJvmClassName(declaration: KSPropertyDeclaration): String? {
-        TODO("Not yet implemented")
+        return getOwnerJvmClassNameHelper(declaration)
     }
 
     override fun getPropertyDeclarationByName(name: KSName, includeTopLevel: Boolean): KSPropertyDeclaration? {
@@ -751,7 +775,18 @@ class ResolverAAImpl(
         fun KSType.toSignature(): String {
             return if (this is KSTypeImpl) {
                 analyze {
-                    this@toSignature.type.toSignature()
+                    val decl = (this@toSignature.declaration as? KSClassDeclaration)
+                    // special handling for single parameter inline value class
+                    // unwrap the underlying for jvm signature.
+                    if (
+                        decl != null &&
+                        (decl.modifiers.contains(Modifier.INLINE) || decl.modifiers.contains(Modifier.VALUE)) &&
+                        decl.primaryConstructor?.parameters?.size == 1
+                    ) {
+                        decl.primaryConstructor!!.parameters.single().type.resolve().toSignature()
+                    } else {
+                        this@toSignature.type.toSignature()
+                    }
                 }
             } else {
                 "<ERROR>"
@@ -825,8 +860,15 @@ class ResolverAAImpl(
                         // recursively substitute to ensure transitive substitution works.
                         // should fix in upstream as well.
                         var result = resolved.type
+                        var cnt = 0
                         while (it.substitute(result) != result) {
+                            if (cnt > 100) {
+                                throw IllegalStateException(
+                                    "Potential infinite loop in type substitution for computeAsMemberOf"
+                                )
+                            }
                             result = it.substitute(result)
+                            cnt += 1
                         }
                         KSTypeImpl.getCached(result)
                     }
@@ -859,10 +901,32 @@ class ResolverAAImpl(
                     )
                 }
                 analyze {
-                    // TODO: recursive substitution does not solve fix point problem for signatures, probably needs fix in upstream.
                     buildSubstitutor {
                         fillInDeepSubstitutor(containing.type, this@buildSubstitutor)
-                    }.let { (function as KSFunctionDeclarationImpl).ktFunctionSymbol.substitute(it) }.let {
+                    }.let {
+                        // recursively substitute to ensure transitive substitution works.
+                        // should fix in upstream as well.
+                        // for functions we need to test both returnType and value parameters converges.
+                        var funcToSub = (function as KSFunctionDeclarationImpl).ktFunctionSymbol.substitute(it)
+                        var next = funcToSub.substitute(it)
+                        var cnt = 0
+                        while (
+                            funcToSub.returnType != next.returnType ||
+                            funcToSub.valueParameters.zip(next.valueParameters)
+                                .any { it.first.returnType != it.second.returnType } ||
+                            funcToSub.receiverType != next.receiverType
+                        ) {
+                            if (cnt > 100) {
+                                throw IllegalStateException(
+                                    "Potential infinite loop in type substitution for computeAsMemberOf"
+                                )
+                            }
+                            funcToSub = next
+                            next = funcToSub.substitute(it)
+                            cnt += 1
+                        }
+                        funcToSub
+                    }.let {
                         KSFunctionImpl(it)
                     }
                 }
